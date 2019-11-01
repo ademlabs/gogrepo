@@ -526,7 +526,7 @@ def process_argv(argv):
 # Commands
 # --------
 def cmd_login(user, passwd):
-    """Attempts to log into GOG and saves the resulting cookiejar to disk.
+    """Attempts to log into GoG and saves the resulting cookiejar to disk.
     """
     login_data = {'user': user,
                   'passwd': passwd,
@@ -546,7 +546,7 @@ def cmd_login(user, passwd):
     if login_data['passwd'] is None:
         login_data['passwd'] = getpass.getpass()
 
-    info("attempting gog login as '{}' ...".format(login_data['user']))
+    info("attempting GoG login as '{}' ...".format(login_data['user']))
 
     # fetch the auth url
     with request(GOG_HOME_URL, delay=0) as page:
@@ -561,7 +561,7 @@ def cmd_login(user, passwd):
         etree = html5lib.parse(page, namespaceHTMLElements=False)
         # Bail if we find a request for a reCAPTCHA
         if len(etree.findall('.//div[@class="g-recaptcha form__recaptcha"]')) > 0:
-            error("cannot continue, gog is asking for a reCAPTCHA :(  try again in a few minutes.")
+            error("cannot continue, GoG is asking for a reCAPTCHA :(  try again in a few minutes.")
             return
         for elm in etree.findall('.//input'):
             if elm.attrib['id'] == 'login__token':
@@ -1141,31 +1141,47 @@ def cmd_clean(cleandir, dryrun, usesubdir, uselongtitle):
                     item_name = os.path.join(dest_subdir, game_item.name)
                     expected_filenames.append(item_name)
 
-                if not usesubdir:
-                    #find all files in the root directory
-                    file_list = os.listdir(cur_fulldir)
-                else:
-                    #recursive find of all files, builds full relative path to the game title directory
-                    file_list = [path.replace(cur_fulldir+"/", "") for path in glob.glob(cur_fulldir + '/**/*', recursive=True)]
+                # Get all contents from the game dir
+                game_dir_contents = glob.glob(cur_fulldir + '/**/*', recursive=True)
+                # Split it into files and dirs
+                files = list(filter(os.path.isfile, game_dir_contents))
+                dirs = list(filter(os.path.isdir, game_dir_contents))
+                # Sort dirs with deepest path first
+                dirs = sorted(dirs, key=lambda x: len(x.split('/')), reverse=True)
+                # Merge the list, with files at the top to process first and remove the leading directory paths
+                file_list = [path.replace(cur_fulldir+"/", "") for path in (files + dirs)]
 
-                for cur_dir_file in file_list:
-                    if not usesubdir and os.path.isdir(os.path.join(cleandir, cur_dir, cur_dir_file)):
-                        continue  # leave subdirs alone
+                for src_file in file_list:
+                    src_file_fullpath = os.path.join(cur_fulldir, src_file)
 
-                    if cur_dir_file not in expected_filenames and cur_dir_file not in ORPHAN_FILE_EXCLUDE_LIST:
-                        info("orphaning file '{}'".format(os.path.join(cur_dir, cur_dir_file)))
+                    if os.path.isdir(src_file_fullpath):
+                        source_type = 'dir'
+                        if not usesubdir:
+                            continue  # leave subdirs alone if not using a subdirectory structure
+                    else:
+                        source_type = 'file'
+
+                    if src_file not in expected_filenames and src_file not in ORPHAN_FILE_EXCLUDE_LIST:
+                        info("orphaning {} '{}'".format(source_type, src_file))
                         have_cleaned = True
-                        dest_dir = os.path.join(orphan_root_dir, cur_dir)
+                        dest_file = os.path.join(orphan_root_dir, cur_dir, src_file)
+                        dest_dir = os.path.dirname(dest_file)
 
                         if not os.path.isdir(dest_dir):
                             if not dryrun:
                                 os.makedirs(dest_dir)
 
-                        file_to_move = os.path.join(cleandir, cur_dir, cur_dir_file)
-                        total_size += os.path.getsize(file_to_move)
+                        total_size += os.path.getsize(src_file_fullpath)
 
                         if not dryrun:
-                            shutil.move(file_to_move, dest_dir)
+                            try:
+                                shutil.move(src_file_fullpath, dest_dir)
+                            except OSError as err:
+                                info(" > " + err.args[0])
+                                if os.path.isdir(dest_file):
+                                    # Destination path exists, safe to remove source
+                                    os.rmdir(src_file_fullpath)
+
     if have_cleaned:
         info('')
         info('total size of newly orphaned files: {}'.format(pretty_size(total_size)))
