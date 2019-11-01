@@ -41,6 +41,7 @@ try:
     from urllib2 import HTTPError, URLError, HTTPCookieProcessor, build_opener, Request
     from itertools import izip_longest as zip_longest
     from StringIO import StringIO
+    from glob import glob
 except ImportError:
     # python 3
     from queue import Queue
@@ -50,6 +51,7 @@ except ImportError:
     from urllib.request import HTTPCookieProcessor, HTTPError, URLError, build_opener, Request
     from itertools import zip_longest
     from io import StringIO
+    import glob
 
 # python 2 / 3 renames
 try: input = raw_input
@@ -337,7 +339,7 @@ def handle_game_updates(olditem, newitem):
 
     if olditem.long_title != newitem.long_title:
         try:
-            info('  -> long title has change "{}" -> "{}"'.format(olditem.long_title, newitem.long_title))
+            info('  -> long title has changed "{}" -> "{}"'.format(olditem.long_title, newitem.long_title))
         except UnicodeEncodeError:
             pass
 
@@ -469,6 +471,8 @@ def process_argv(argv):
     g1.add_argument('-wait', action='store', type=float,
                     help='wait this long in hours before starting', default=0.0)  # sleep in hr
     g1.add_argument('-skipids', action='store', help='id[s] of the game[s] in the manifest to NOT download')
+    g1.add_argument('-usesubdir', action='store_true', help='create subdirectories for each os type and extra files in game directory')
+    g1.add_argument('-uselongtitle', action='store_true', help='use long title instead of slug title for game directory')
 
     g1 = sp1.add_parser('import', help='Import files with any matching MD5 checksums found in manifest')
     g1.add_argument('src_dir', action='store', help='source directory to import games from')
@@ -477,6 +481,8 @@ def process_argv(argv):
     g1 = sp1.add_parser('backup', help='Perform an incremental backup to specified directory')
     g1.add_argument('src_dir', action='store', help='source directory containing gog items')
     g1.add_argument('dest_dir', action='store', help='destination directory to backup files to')
+    g1.add_argument('-usesubdir', action='store_true', help='game directories contains subdirectories for each os type and extra files')
+    g1.add_argument('-uselongtitle', action='store_true', help='game directories are in the long title format')
 
     g1 = sp1.add_parser('verify', help='Scan your downloaded GOG files and verify their size, MD5, and zip integrity')
     g1.add_argument('gamedir', action='store', help='directory containing games to verify', nargs='?', default='.')
@@ -485,10 +491,14 @@ def process_argv(argv):
     g1.add_argument('-skipsize', action='store_true', help='do not perform size check')
     g1.add_argument('-skipzip', action='store_true', help='do not perform zip integrity check')
     g1.add_argument('-delete', action='store_true', help='delete any files which fail integrity test')
+    g1.add_argument('-usesubdir', action='store_true', help='game directories contains subdirectories for each os type and extra files')
+    g1.add_argument('-uselongtitle', action='store_true', help='game directories are in the long title format')
 
     g1 = sp1.add_parser('clean', help='Clean your games directory of files not known by manifest')
     g1.add_argument('cleandir', action='store', help='root directory containing gog games to be cleaned')
     g1.add_argument('-dryrun', action='store_true', help='do not move files, only display what would be cleaned')
+    g1.add_argument('-usesubdir', action='store_true', help='game directories contains subdirectories for each os type and extra files')
+    g1.add_argument('-uselongtitle', action='store_true', help='game directories are in the long title format')
 
     g1 = p1.add_argument_group('other')
     g1.add_argument('-h', '--help', action='help', help='show help message and exit')
@@ -771,7 +781,7 @@ def cmd_import(src_dir, dest_dir):
             shutil.copy(f, dest_file)
 
 
-def cmd_download(savedir, skipextras, skipgames, skipids, dryrun, id):
+def cmd_download(savedir, skipextras, skipgames, skipids, dryrun, id, usesubdir, uselongtitle):
     sizes, rates, errors = {}, {}, {}
     work = Queue()  # build a list of work items
 
@@ -803,9 +813,11 @@ def cmd_download(savedir, skipextras, skipgames, skipids, dryrun, id):
         items[:] = [item for item in items if item.title not in ignore_list]
 
     # Find all items to be downloaded and push into work queue
-    for item in sorted(items, key=lambda g: g.title):
-        info("{%s}" % item.title)
-        item_homedir = os.path.join(savedir, item.title)
+    for item in sorted(items, key=lambda g: g.title):        
+        game_title = item.title if not uselongtitle else item.long_title
+        info("{%s}" % game_title)
+        item_homedir = os.path.join(savedir, game_title)
+
         if not dryrun:
             if not os.path.isdir(item_homedir):
                 os.makedirs(item_homedir)
@@ -859,7 +871,8 @@ def cmd_download(savedir, skipextras, skipgames, skipids, dryrun, id):
         for game_item in item.downloads + item.extras:
             if game_item.name is None:
                 continue  # no game name, usually due to 404 during file fetch
-            dest_file = os.path.join(item_homedir, game_item.name)
+            dest_subdir = '' if not usesubdir else game_item.os_type.replace('extra', 'extras')
+            dest_file = os.path.join(item_homedir, dest_subdir, game_item.name)
 
             if os.path.isfile(dest_file):
                 if game_item.size is None:
@@ -969,7 +982,7 @@ def cmd_download(savedir, skipextras, skipgames, skipids, dryrun, id):
         raise
 
 
-def cmd_backup(src_dir, dest_dir):
+def cmd_backup(src_dir, dest_dir, usesubdir, uselongtitle):
     gamesdb = load_manifest()
 
     info('finding all known files in the manifest')
@@ -979,17 +992,21 @@ def cmd_backup(src_dir, dest_dir):
             if itm.name is None:
                 continue
 
-            src_game_dir = os.path.join(src_dir, game.title)
-            src_file = os.path.join(src_game_dir, itm.name)
-            dest_game_dir = os.path.join(dest_dir, game.title)
-            dest_file = os.path.join(dest_game_dir, itm.name)
+            game_title = game.title if not uselongtitle else game.long_title
+            dest_subdir = '' if not usesubdir else itm.os_type.replace('extra', 'extras')
+
+            src_game_dir = os.path.join(src_dir, game_title)
+            src_file = os.path.join(src_game_dir, dest_subdir, itm.name)
+            dest_game_dir = os.path.join(dest_dir, game_title)
+            dest_game_subdir = os.path.join(dest_game_dir, dest_subdir)
+            dest_file = os.path.join(dest_game_subdir, itm.name)
 
             if os.path.isfile(src_file):
                 if itm.size != os.path.getsize(src_file):
                     warn('source file %s has unexpected size. skipping.' % src_file)
                     continue
-                if not os.path.isdir(dest_game_dir):
-                    os.makedirs(dest_game_dir)
+                if not os.path.isdir(dest_game_subdir):
+                    os.makedirs(dest_game_subdir)
                 if not os.path.exists(dest_file) or itm.size != os.path.getsize(dest_file):
                     info('copying to %s...' % dest_file)
                     shutil.copy(src_file, dest_file)
@@ -1002,7 +1019,7 @@ def cmd_backup(src_dir, dest_dir):
                     shutil.copy(os.path.join(src_game_dir, extra_file), dest_game_dir)
 
 
-def cmd_verify(gamedir, check_md5, check_filesize, check_zips, delete_on_fail, id):
+def cmd_verify(gamedir, check_md5, check_filesize, check_zips, delete_on_fail, id, usesubdir, uselongtitle):
     """Verifies all game files match manifest with any available md5 & file size info
     """
     item_count = 0
@@ -1036,8 +1053,11 @@ def cmd_verify(gamedir, check_md5, check_filesize, check_zips, delete_on_fail, i
 
             item_count += 1
 
-            itm_dirpath = os.path.join(game.title, itm.name)
-            itm_file = os.path.join(gamedir, game.title, itm.name)
+            game_title = game.title if not uselongtitle else game.long_title
+            dest_subdir = '' if not usesubdir else itm.os_type.replace('extra', 'extras')
+
+            itm_dirpath = os.path.join(game_title, dest_subdir, itm.name)            
+            itm_file = os.path.join(gamedir, itm_dirpath)
 
             if os.path.isfile(itm_file):
                 info('verifying %s...' % itm_dirpath)
@@ -1080,7 +1100,7 @@ def cmd_verify(gamedir, check_md5, check_filesize, check_zips, delete_on_fail, i
         info('deleted items....... %d' % del_file_cnt)
 
 
-def cmd_clean(cleandir, dryrun):
+def cmd_clean(cleandir, dryrun, usesubdir, uselongtitle):
     items = load_manifest()
     items_by_title = {}
     total_size = 0  # in bytes
@@ -1088,7 +1108,8 @@ def cmd_clean(cleandir, dryrun):
 
     # make convenient dict with title/dirname as key
     for item in items:
-        items_by_title[item.title] = item
+        game_title = item.title if not uselongtitle else item.long_title
+        items_by_title[game_title] = item
 
     # create orphan root dir
     orphan_root_dir = os.path.join(cleandir, ORPHAN_DIR_NAME)
@@ -1109,23 +1130,42 @@ def cmd_clean(cleandir, dryrun):
             else:
                 # dir is valid game folder, check its files
                 expected_filenames = []
+
                 for game_item in items_by_title[cur_dir].downloads + items_by_title[cur_dir].extras:
-                    expected_filenames.append(game_item.name)
-                for cur_dir_file in os.listdir(cur_fulldir):
-                    if os.path.isdir(os.path.join(cleandir, cur_dir, cur_dir_file)):
+                    if usesubdir:
+                        #load up the known subdirs into the expected files list
+                        dest_subdir = game_item.os_type.replace('extra', 'extras')
+                        expected_filenames.append(dest_subdir)
+                    else:
+                        dest_subdir = ''
+                    item_name = os.path.join(dest_subdir, game_item.name)
+                    expected_filenames.append(item_name)
+
+                if not usesubdir:
+                    #find all files in the root directory
+                    file_list = os.listdir(cur_fulldir)
+                else:
+                    #recursive find of all files, builds full relative path to the game title directory
+                    file_list = [path.replace(cur_fulldir+"/", "") for path in glob.glob(cur_fulldir + '/**/*', recursive=True)]
+
+                for cur_dir_file in file_list:
+                    if not usesubdir and os.path.isdir(os.path.join(cleandir, cur_dir, cur_dir_file)):
                         continue  # leave subdirs alone
+
                     if cur_dir_file not in expected_filenames and cur_dir_file not in ORPHAN_FILE_EXCLUDE_LIST:
                         info("orphaning file '{}'".format(os.path.join(cur_dir, cur_dir_file)))
                         have_cleaned = True
                         dest_dir = os.path.join(orphan_root_dir, cur_dir)
+
                         if not os.path.isdir(dest_dir):
                             if not dryrun:
                                 os.makedirs(dest_dir)
+
                         file_to_move = os.path.join(cleandir, cur_dir, cur_dir_file)
                         total_size += os.path.getsize(file_to_move)
+
                         if not dryrun:
                             shutil.move(file_to_move, dest_dir)
-
     if have_cleaned:
         info('')
         info('total size of newly orphaned files: {}'.format(pretty_size(total_size)))
@@ -1147,18 +1187,18 @@ def main(args):
         if args.wait > 0.0:
             info('sleeping for %.2fhr...' % args.wait)
             time.sleep(args.wait * 60 * 60)
-        cmd_download(args.savedir, args.skipextras, args.skipgames, args.skipids, args.dryrun, args.id)
+        cmd_download(args.savedir, args.skipextras, args.skipgames, args.skipids, args.dryrun, args.id, args.usesubdir, args.uselongtitle)
     elif args.cmd == 'import':
         cmd_import(args.src_dir, args.dest_dir)
     elif args.cmd == 'verify':
         check_md5 = not args.skipmd5
         check_filesize = not args.skipsize
         check_zips = not args.skipzip
-        cmd_verify(args.gamedir, check_md5, check_filesize, check_zips, args.delete, args.id)
+        cmd_verify(args.gamedir, check_md5, check_filesize, check_zips, args.delete, args.id, args.usesubdir, args.uselongtitle)
     elif args.cmd == 'backup':
-        cmd_backup(args.src_dir, args.dest_dir)
+        cmd_backup(args.src_dir, args.dest_dir, args.usesubdir, args.uselongtitle)
     elif args.cmd == 'clean':
-        cmd_clean(args.cleandir, args.dryrun)
+        cmd_clean(args.cleandir, args.dryrun, args.usesubdir, args.uselongtitle)
 
     etime = datetime.datetime.now()
     info('--')
